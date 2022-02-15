@@ -61,8 +61,8 @@ all: main-build
 main-build: 0\ -\ Main_Controller.elf secondary-outputs
 
 # Tool invocations
-0\ -\ Main_Controller.elf: $(OBJS) $(USER_OBJS) C:\Users\Francesco\Desktop\POLITO\TESI\SOFTWARE\ -\ FIRMWARE\0\ -\ Main_Controller\STM32H743ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "0 - Main_Controller.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\Francesco\Desktop\POLITO\TESI\SOFTWARE - FIRMWARE\0 - Main_Controller\STM32H743ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="0 - Main_Controller.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
+0\ -\ Main_Controller.elf: $(OBJS) $(USER_OBJS) C:\Users\Francesco\Desktop\POLITO\ FATTO\POLITO\TESI\SOFTWARE\ -\ FIRMWARE\0\ -\ Main_Controller\STM32H743ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "0 - Main_Controller.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\Francesco\Desktop\POLITO FATTO\POLITO\TESI\SOFTWARE - FIRMWARE\0 - Main_Controller\STM32H743ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="0 - Main_Controller.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -u _printf_float -u _scanf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

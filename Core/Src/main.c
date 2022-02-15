@@ -32,11 +32,11 @@
 
 // KINEMATIC VARIABLES
 #define L1 0.745
-#define L2 0.685
-#define OFF 0.07
+#define L2 0.795
+#define OFF 0.12
 #define L1square 0.555025
-#define L2square 0.469225
-#define OFFsquare 0.0049
+#define L2square 0.632025
+#define OFFsquare 0.0144
 
 //ACTUATOR LIMITS
 #define P_MAX 12.5 // posizione
@@ -57,15 +57,16 @@
 #define LINK_BOARD_CALIBRATION_CHECK_MSG_ID 0x28 // ID definito in esadecimale
 // Gli status, feedback, calibration hanno un unico ID poichè all'interno una stringa mi indica a quale Board mi riferisco
 
-
+#define MAX_POS_ERROR 0.01
 
 
 #define MOTOR_FB_DEBUG 0
-int LINK_FB_DEBUG = 0;
 #define TRAJ_PLAN_DEBUG 0
 #define POS_CONTROLLER_DEBUG 0
 #define SPEED_CONTROLLER_DEBUG 0
 
+int LINK_FB_DEBUG = 0;
+int TELEMETRY  = 0;
 
 //CONTROLLER DEFINEs
 #define MAX_INTEGRAL_ERROR 1000
@@ -79,7 +80,7 @@ int LINK_FB_DEBUG = 0;
 /* Private variables ---------------------------------------------------------*/
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
 
-#pragma location=0x30040000 // Creato dal software (non toccare)
+#pragma location=0x30040000
 ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
 #pragma location=0x30040060
 ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
@@ -165,9 +166,10 @@ float speed_previous_error[3];
 float speed_command[3];
 volatile int flag_speed_controller = 0;
 
-// LINK BENDING FEEDBACK VARAIBLES
+// LINK  FEEDBACK VARAIBLES
 float actual_horiz_bend = 0; //In futuro occorre creare un vettore di 2 elementi essendoci due 2 link
 float actual_vert_bend = 0;
+float pressure = 0;
 
 // STATUS VARIABLES
 int motor_status_flag[3];
@@ -177,7 +179,14 @@ int link_cal_check[2]; // Variabile che uso per verificare la calibrazione (assu
 // VESC CONTROL VARIABLE
 float Joint_speed_target_planned[3]; //here the trajector planner will update the ref point for the position controllers every Ts
 
-
+//SERIAL CARTESIAN INPUT VARIABLE
+int flag_wait_new_input = 0;
+volatile int input_flag = 0;
+uint8_t UART3_rxBuffer[4] = {0};
+volatile int input_counter = 0;
+int temp_x = 0;
+int temp_y = 0;
+int temp_z = 0;
 
 /* USER CODE END PV */
 
@@ -191,7 +200,6 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
-
 /* USER CODE BEGIN PFP */
 int float_to_uint(float x, float x_min , float x_max, unsigned int bits);
 float uint_to_float( int x_int , float x_min , float x_max , int bits);
@@ -203,6 +211,7 @@ void CAN_TxHeader_Config();
 void ActivateMotor(int id);
 void SendTorque(int id, float u);
 
+void unpack_vesc_FB();
 void unpack_motor_FB();
 void unpack_link_FB();
 void unpack_link_STATUS();
@@ -226,6 +235,8 @@ void POPUP_activate_motors();
 void POPUP_start_controllers();
 
 void POPUP_start_plan();
+
+void POPUP_stop_plan();
 
 //homing
 void POPUP_homing();
@@ -278,7 +289,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   RetargetInit(&huart3);
 
-  printf("POPUP Robot Main Controller V0.1\n");
+  printf("POPUP Robot Main Controller V0.1\n\n");
 
 
   printf("CAN Register Configuring... \n");
@@ -297,39 +308,29 @@ int main(void)
    if ( HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) == HAL_OK)   // l'ultimo argomento non ci interessa se usiamo la FIFO
  	  printf("CAN Configuring: DONE\n\n\n");
 
-
-   HAL_Delay(2000);
    ////////////////////////////////////////////////////
    //assign controllers parameter
 
-   //joint 1 position PID controller gain
-	 pos_KP[0] = 5;
-	 pos_KI[0] = 0;
-	 pos_KD[0] = 0;
 
 	//joint 2 position PID controller gain
-	 pos_KP[1] = 12;
-	 pos_KI[1] = 0;
+	 pos_KP[1] = 5;
+	 pos_KI[1] = 0.0;
 	 pos_KD[1] = 0;
+	//joint 2 speed PID controller gain
+	 speed_KP[1] = 15;
+	 speed_KI[1] = 0;
+	 speed_KD[1] = 1;
+
 
 	//joint 3 position PID controller gain
-	 pos_KP[2] = 12;
+	 pos_KP[2] = 5;
 	 pos_KI[2] = 0;
 	 pos_KD[2] = 0;
 
-	//joint 1 speed PID controller gain
-	 speed_KP[0] = 0;
-	 speed_KI[0] = 0;
-	 speed_KD[0] = 0;
-
-	//joint 2 speed PID controller gain
-	 speed_KP[1] = 8;
-	 speed_KI[1] = 0;
-	 speed_KD[1] = 0;
-	 //joint 3 speed PID controller gain
-	 speed_KP[2] = 8;
+	//joint 3 speed PID controller gain
+	 speed_KP[2] = 15;
 	 speed_KI[2] = 0;
-	 speed_KD[2] = 0;
+	 speed_KD[2] = 1;
 
 	/////////////////////////////////////
   //veryfy system status (link + sensors)
@@ -337,81 +338,115 @@ int main(void)
  //send calibration command to link boards
 	POPUP_calibrate_link_sensors(11);
 
-
   //activate motors
 	POPUP_activate_motors();
+
+
+	printf("\nSystem Initialized\n\n");
+
+	HAL_Delay(1000);
+
+	printf("\Starting Homing Procedure\n");
+
   //start controllers
   //homing
 	 //POPUP_
-     //POPUP_homing();
+	POPUP_homing();
   //start loop
-
-	 printf("\nSystem Initialized\n");
-
-
-  Cartesian_target[0] = 0.7; //X
-  Cartesian_target[1] = -0.7; //Y
-  Cartesian_target[2] = 0.8; //Z
-
-  printf("Target = [ X: %f   Y: %f   Z: %f ]\n",Cartesian_target[0],Cartesian_target[1],Cartesian_target[2]);
-
-  InverseKinematic(Cartesian_target, 1); //Target[3] , Mode (elbow up,down)
-
-  printf("Joint Target = [ q1: %f   q2: %f   q3: %f ]\n",Joint_target[0],Joint_target[1],Joint_target[2]);
-  printf("Actual Joint position = [ q1: %f   q2: %f  q3: %f ]\n",actualPos[0],actualPos[1],actualPos[2]);
-  Joint_target[2] = -Joint_target[2];
-  printf("\nStarting trajectory planner...\n");
-
-  TrajectorPlanner(actualPos, Joint_target, 10);
-
-  printf("\nStarting trajectory planning completed.\n");
-
-
-  if(TRAJ_PLAN_DEBUG) {
-	  int i,j;
-	  for(i = 0; i < 3; i++) {
-		  for(j = 0; j < 101; j++) {
-			  printf("T: %f q%d: %f  qd%d: %f\n",(j*0.1),i,Joint_target_plan[j][i],i,Joint_speed_target_plan[j][i]); //matrix of Ns rows and 3 column
-		  	  }
-		  printf("\n\n");
-	  	  }
-  }
-
-  //assign the first planned variable to the position controller input
-  for(int m = 0; m<3; m++) {
-	  Joint_target_planned[m] = Joint_target_plan[0][m];
-  }
 
 
   //start controllers
   POPUP_start_controllers();
 
-  HAL_Delay(1000);
-
   //start planned movement
   POPUP_start_plan();
 
-  //start printing data from link sensors
-  LINK_FB_DEBUG = 1;
 
+  //start print telemetry (received from simulink)
+  TELEMETRY = 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+
 	 if(flag_pos_controller  == 1)
 		 PositionController();
 
 	if(flag_speed_controller == 1) {
+
 		SpeedController();
-	  	 CAN_TX_vesc_speed(-Joint_speed_target_planned[0]);
+
+	  	CAN_TX_vesc_speed(-Joint_speed_target_planned[0]);
+
+	  	if(TELEMETRY)
+	  		//printf("%3.2f\n",actual_horiz_bend);
+	  		//printf("%1.4f,%1.4f,%1.4f,%1.4f\n",Joint_target_planned[1],actualPos[1],Joint_speed_target_planned[1],actualSpeed[1]); //joint 2 position command and feedback
+	  		printf("%1.4f,%3.2f\n",actualPos[2],actual_horiz_bend); //joint 2 position command and feedback
+
+
+	 	if(flag_traj_compl == 1) {
+	 			//printf("\n Planned Trajectory Completed\n");
+	 			flag_traj_compl = 0;
+	 			//TELEMETRY = 0;
+	 			POPUP_stop_plan();
+	 			//printf("\nInsert new cartesian target\n");
+	 			input_counter = 0;
+	 			HAL_UART_Receive_IT (&huart3, UART3_rxBuffer, 4); //enable receive interrupt on uart
+
+	 	}
+
 	}
 
-	//if first traj is completed start with second pianification
-	if(flag_traj_compl == 1) {
 
-	}
+//	if(flag_wait_new_input == 1) {
+//		printf("New Cartesian input: X: %dmm  Y: %dmm  Z: %dmm \n",temp_x,temp_y,temp_z);
+//
+//		flag_wait_new_input = 0;
+//
+//		  Cartesian_target[0] = (float)temp_x/1000.0F; //X
+//		  Cartesian_target[1] = (float)temp_y/1000.0F; //Y
+//		  Cartesian_target[2] = (float)temp_z/1000.0F; //Z
+//
+//
+//		//compute new trajectory planning
+//		  printf("Target = [ X: %f   Y: %f   Z: %f ]\n",Cartesian_target[0],Cartesian_target[1],Cartesian_target[2]);
+//
+//		    InverseKinematic(Cartesian_target, 1); //Target[3] , Mode (elbow up,down)
+//
+//		    printf("Joint Target = [ q1: %f   q2: %f   q3: %f ]\n",Joint_target[0],Joint_target[1],Joint_target[2]);
+//		    printf("Actual Joint position = [ q1: %f   q2: %f  q3: %f ]\n",actualPos[0],actualPos[1],actualPos[2]);
+//		    Joint_target[2] = -Joint_target[2];
+//
+//		   TrajectorPlanner(actualPos, Joint_target, 10);
+//
+//		  printf("\nStarting trajectory planning completed.\n");
+//
+//
+//		  if(TRAJ_PLAN_DEBUG) {
+//			  int i,j;
+//			  for(i = 0; i < 3; i++) {
+//				  for(j = 0; j < 101; j++) {
+//					  printf("T: %f q%d: %f  qd%d: %f\n",(j*0.1),i,Joint_target_plan[j][i],i,Joint_speed_target_plan[j][i]); //matrix of Ns rows and 3 column
+//				  	  }
+//				  printf("\n\n");
+//			  	  }
+//		  }
+//
+//		  //assign the first planned variable to the position controller input
+//		  for(int m = 0; m<3; m++) {
+//			  Joint_target_planned[m] = Joint_target_plan[0][m];
+//		  }
+//
+//		  TELEMETRY = 1;
+//		  POPUP_start_plan();
+//
+//
+//
+//	}
+
 
 	  //printf("VESC target speed: %f\n",Joint_speed_target_planned[0]);
 
@@ -601,9 +636,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 120;
+  htim2.Init.Prescaler = 120 - 1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1000;
+  htim2.Init.Period = 1000 - 1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -646,9 +681,9 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 120;
+  htim3.Init.Prescaler = 120 - 1;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 10000;
+  htim3.Init.Period = 10000 - 1;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -938,6 +973,7 @@ void unpack_vesc_FB() {
 
 	  float mot1_speed = (float)(rpm/1120.0); //1120 = 14(pole-pair motor)*80 (gearbox reduction)
 
+	  actualSpeed[0] = mot1_speed;
 	  //printf("Speed : %f rad/s \n",mot1_speed*0.10472 );
 
 	  //printf("rpm : %d \n",rpm);
@@ -986,15 +1022,20 @@ void unpack_link_FB() {
 
   int bend_vert_int = CAN_rx_buffer[3] << 8 | CAN_rx_buffer[4];
 
+  int pressure_int = CAN_rx_buffer[5] << 8 | CAN_rx_buffer[6];
+
+
+
 actual_horiz_bend = uint_to_float(bend_horiz_int, -90, 90, 16);
 
 actual_vert_bend =  uint_to_float(bend_vert_int, -90, 90, 16);
 
+pressure = uint_to_float(pressure_int, 0, 2, 16);
+
 link_status_flag[link_id - 10] = CAN_rx_buffer[5]; //
 
   if (LINK_FB_DEBUG) {
-    printf("%2.1f\n",link_id - 9,actual_horiz_bend,actual_vert_bend);
-
+    printf("%d - %2.1f - %2.1f - %f\n",link_id - 9,actual_horiz_bend,actual_vert_bend,pressure);
   }
 }
 
@@ -1109,7 +1150,7 @@ void ActivateMotor(int id) {
 
 		  		  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &pTxHeader, CAN_tx_buffer) == HAL_OK) {
 		  			  //HAL_GPIO_TogglePin(GPIOB, LD3_Pin);
-		  			 // printf("Motor %lu Activated \n",pTxHeader.Identifier);
+		  			 printf("Motor %lu Activated \n",pTxHeader.Identifier);
 		  		  }
 }
 
@@ -1134,7 +1175,6 @@ void DeactivateMotor(int id) {
 		  			  //printf("Motor %lu Activated \n",pTxHeader.Identifier);
 		  		  }
 }
-
 
 void SendTorque(int id, float u) {
 
@@ -1185,6 +1225,8 @@ void SendTorque(int id, float u) {
 }
 
 void InverseKinematic(float EE_target[3], int Mode)
+
+
 {
 
   //LOCAL VARIABLE
@@ -1212,7 +1254,7 @@ void InverseKinematic(float EE_target[3], int Mode)
   if (c3 < 1 && c3 > -1)
   	  { // if requested point is part of WS
 
-	  if (X >= 0 && Y >= 0 && Mode == 1)
+	  if (X >= 0 && Y > 0 && Mode == 1)
 	  	  {
       s3_p = sqrt(1 - pow(c3, 2));
 
@@ -1224,7 +1266,7 @@ void InverseKinematic(float EE_target[3], int Mode)
       Joint_target[0] = atan2(-s1, -c1);
 	  	  }
 
-	  if (X >= 0 && Y >= 0 && Mode == 0)
+	  if (X >= 0 && Y > 0 && Mode == 0)
 	  	  {
       s3_p = sqrt(1 - pow(c3, 2));
 
@@ -1276,11 +1318,13 @@ void InverseKinematic(float EE_target[3], int Mode)
 
 	            float K_m = -Ksquare;
 
-	           c1 = (X/K_m + (Y*OFF)/(K_m*K_m))/(1+(OFFsquare)/(K_m*K_m));
+	           c1 = (X/-K + (Y*OFF)/(K_m*K_m)) / (1+(OFFsquare)/(K_m*K_m));
 
 	            s1= sqrt(1-pow(c1,2));
 
 	  Joint_target[0] = atan2(s1,c1) - 3.1415;
+
+	  printf("%f %f %f\n",c1,s1,Joint_target[0]);
 	  }
   }
   else
@@ -1290,6 +1334,8 @@ void InverseKinematic(float EE_target[3], int Mode)
   }
 }
 // joint space trjector planener
+
+
 void TrajectorPlanner(float q0[3], float qf[3], float t)
 {
   // q0 initial pose
@@ -1367,10 +1413,30 @@ void plan_step() {
 	if(plan_counter < 101) {
 	  for(int m = 0; m<3; m++) {
 		  Joint_target_planned[m] = Joint_target_plan[plan_counter][m];
-		  //printf("%d -- %f\n",m,Joint_target_planned[m]);
-		  Joint_speed_target_planned[0] =  Joint_speed_target_plan[plan_counter][0];
+		  Joint_speed_target_planned[m] =  Joint_speed_target_plan[plan_counter][0];
+
+		  actualPos[0] = Joint_target_plan[plan_counter][0];
+
 	  	  }
 	}
+
+	else {
+		plan_counter = 0;
+		flag_traj_compl = 1;
+	}
+
+}
+
+void POPUP_start_plan() {
+	//start timers base
+	HAL_TIM_Base_Start_IT(&htim4);
+
+}
+
+void POPUP_stop_plan() {
+	//start timers base
+	HAL_TIM_Base_Stop_IT(&htim4);
+
 }
 
 void PositionController() {
@@ -1395,7 +1461,6 @@ void PositionController() {
 	  if (pos_command[i] > V_MAX)   pos_command[i] = V_MAX;
 
 	  if(POS_CONTROLLER_DEBUG) {
-		  //printf("MOT_ID: %d - Error: %f - Command: %f\n",i+1,pos_error[i],pos_command[i]);
 		 printf("POS\\ MOT_ID: %d - Target: %10f - Actual: %10f - Error: %10f - Command: %10f\n",i+1,Joint_target_planned[i],actualPos[i],pos_error[i],pos_command[i]);
 
 	  }
@@ -1459,20 +1524,20 @@ void POPUP_system_check() {
 
 	int i = 0;
 
-//	for(i = 1; i<3; i++) {
-//		DeactivateMotor(i+1);
-//		while(motor_status_flag[i] == 0)
-//			{
-//				printf("Motor %d not found\n",i+1);
-//				HAL_Delay(1000);
-//				DeactivateMotor(i+1);
-//			}
-//		printf("Motor %d found\n",i+1);
-//	}
+	for(i = 1; i<3; i++) {
+		DeactivateMotor(i+1);
+		while(motor_status_flag[i] == 0)
+			{
+				printf("Motor %d not found\n",i+1);
+				HAL_Delay(1000);
+				DeactivateMotor(i+1);
+			}
+		printf("Motor %d found\n",i+1);
+	}
 
 
 	//link board status check
-	// 2 link board should be found
+	//2 link board should be found
 
 	for(i = 1; i < 2; i++) {
 	while(link_status_flag[i] == 0) {
@@ -1504,9 +1569,7 @@ void POPUP_activate_motors() {
 	int i = 0;
 		for(i = 0; i<3; i++) {
 		ActivateMotor(i+1);
-		printf("Motor %d activated\n",i+1);
 		HAL_Delay(100);
-
 	}
 }
 
@@ -1517,20 +1580,46 @@ void POPUP_start_controllers() {
 
 }
 
-void POPUP_start_plan() {
-	//start timers base
-	HAL_TIM_Base_Start_IT(&htim4);
-
-}
-
 void POPUP_homing() {
 
+	 Cartesian_target[0] = 0.5; //X
+	  Cartesian_target[1] = -0.1; //Y
+	  Cartesian_target[2] = 0.7; //Z
+
+	  printf("Target = [ X: %f   Y: %f   Z: %f ]\n",Cartesian_target[0],Cartesian_target[1],Cartesian_target[2]);
+
+	  InverseKinematic(Cartesian_target, 1); //Target[3] , Mode (elbow up,down)
+
+	  printf("Joint Target = [ q1: %f   q2: %f   q3: %f ]\n",Joint_target[0],Joint_target[1],Joint_target[2]);
+	  printf("Actual Joint position = [ q1: %f   q2: %f  q3: %f ]\n",actualPos[0],actualPos[1],actualPos[2]);
+	  Joint_target[2] = -Joint_target[2];
+	  printf("\nStarting trajectory planner...\n");
+
+	  TrajectorPlanner(actualPos, Joint_target, 10);
+
+	  printf("trajectory planning completed.\n");
+
+
+	  if(TRAJ_PLAN_DEBUG) {
+		  int i,j;
+		  for(i = 0; i < 3; i++) {
+			  for(j = 0; j < 101; j++) {
+				  printf("T: %f q%d: %f  qd%d: %f\n",(j*0.1),i,Joint_target_plan[j][i],i,Joint_speed_target_plan[j][i]); //matrix of Ns rows and 3 column
+			  	  }
+			  printf("\n\n");
+		  	  }
+	  }
+
+	  //assign the first planned variable to the position controller input
+	  for(int m = 0; m<3; m++) {
+		  Joint_target_planned[m] = Joint_target_plan[0][m];
+	  }
 }
 
 void POPUP_calibrate_link_sensors(int id) {
 	HAL_Delay(1000);
 	CAN_TX_link_board_calibration(id); //send status check to link board 1
-	printf("sent calibration command to link board %d\n",(id - 9));
+	printf("sent calibration command to link board %d\n\n",(id - 9));
 	//wait calibration check from link board
     while(link_cal_check[id - 10] == 0) {
     	printf("Waiting calibration check from link board\n");
@@ -1542,10 +1631,16 @@ void POPUP_calibrate_link_sensors(int id) {
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	// Check which version of the timer triggered this callback and toggle LED
 	if (htim == &htim2) {
+		if(input_flag == 0)
 		flag_speed_controller = 1;
+		else
+		SpeedController();
 	}
 	if (htim == &htim3) {
+		if(input_flag == 0)
 		flag_pos_controller = 1;
+		else
+		PositionController();
 	}
 
 	if (htim == &htim4) {
@@ -1553,6 +1648,40 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 
 }
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	//UART3_rxBuffer[3] = "\0" ;
+	input_counter++;
+
+	int xx = (int) atoi ((const char *) UART3_rxBuffer) ;
+
+	//this callback is activate when new input has to be inseterd
+	if(input_counter == 1) {//inserted X
+		temp_x = xx;
+		printf("X: %d\n",temp_x);
+	}
+
+	if(input_counter == 2) {//inserted y
+			temp_y = xx;
+			printf("Y: %d\n",temp_y);
+	}
+
+	if(input_counter == 3) {//inserted z
+				temp_z = xx;
+				printf("Z: %d\n",temp_z);
+				flag_wait_new_input = 1;
+
+	}
+
+	for(int i = 0; i< 4; i++) {
+	UART3_rxBuffer[i] = 0;
+	}
+
+	HAL_UART_Receive_IT(&huart3, UART3_rxBuffer, 4);
+
+}
+
 
 float uint_to_float( int x_int , float x_min , float x_max , int bits) {
 
